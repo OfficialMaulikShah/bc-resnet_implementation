@@ -279,81 +279,6 @@ Example with a stricter threshold:
 python demo.py --checkpoint astra.pt --keyword yes --threshold 0.90
 ```
 
-## Recommended Hackathon Workflow
-
-The recommended order is:
-
-```text
-1. Set up BC-ResNet
-        ↓
-2. Download Google Speech Commands v1
-        ↓
-3. Train BC-ResNet-1
-        ↓
-4. Verify validation/test accuracy
-        ↓
-5. Run microphone demo
-        ↓
-6. Say the selected keyword
-        ↓
-7. Show ✓ DETECTED
-        ↓
-8. Add a custom keyword later if time permits
-```
-
-### Minimum viable demo
-
-The minimum working prototype is simply:
-
-```text
-🎤 Microphone
-     ↓
-  BC-ResNet
-     ↓
-  keyword?
-     ↓
-✓ DETECTED
-```
-
-A website or graphical interface is optional. The terminal demo is enough to validate the complete ML pipeline before spending time on UI.
-
-## Troubleshooting
-
-### `OSError: PortAudio library not found`
-
-Install the Ubuntu system libraries:
-
-```bash
-sudo apt update
-sudo apt install portaudio19-dev libportaudio2
-```
-
-Then test:
-
-```bash
-python -c "import sounddevice as sd; print(sd.query_devices())"
-```
-
-### No microphone appears
-
-Run:
-
-```bash
-python -c "import sounddevice as sd; print(sd.query_devices())"
-```
-
-Check that an input device is listed. If multiple microphones are available, the default system input device can be changed in Ubuntu's sound settings.
-
-### CUDA/GPU issues
-
-To check whether PyTorch sees your GPU:
-
-```bash
-python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
-```
-
-If CUDA is unavailable, the code can fall back to CPU, although training and inference may be slower.
-
 ## Project Files
 
 ```text
@@ -366,7 +291,6 @@ demo.py             Real-time microphone keyword detection
 
 ## Reference
 
-If you find this work useful for your research, please cite:
 
 ```text
 @inproceedings{kim21l_interspeech,
