@@ -150,9 +150,14 @@ The training/validation/test splits and the 12-class version are generated autom
 
 ## Real-Time Keyword Demo
 
-After training, `demo.py` can run BC-ResNet against your microphone in real time.
+After training, `demo.py` can run BC-ResNet in either of two modes:
 
-For example, if you trained the model and want to detect `yes`:
+1. **Microphone mode** — continuously listens and detects the selected keyword.
+2. **Audio-file mode** — accepts a local audio file such as `.wav` and classifies it once.
+
+### Microphone mode
+
+For example, to detect `yes`:
 
 ```bash
 python demo.py --checkpoint astra.pt --keyword yes
@@ -163,6 +168,67 @@ For `stop`:
 ```bash
 python demo.py --checkpoint astra.pt --keyword stop
 ```
+
+Microphone mode requires `sounddevice`. On Ubuntu, install its PortAudio system dependency if necessary:
+
+```bash
+pip install sounddevice
+sudo apt install portaudio19-dev libportaudio2
+```
+
+You can test that the microphone is visible with:
+
+```bash
+python -c "import sounddevice as sd; print(sd.query_devices())"
+```
+
+### Audio-file mode
+
+You can also upload/provide an audio file and have the model recognize the keyword without using the microphone. This mode does **not** require `sounddevice` or PortAudio.
+
+For a WAV file:
+
+```bash
+python demo.py --checkpoint astra.pt --keyword yes --file my_audio.wav
+```
+
+For example:
+
+```bash
+python demo.py --checkpoint astra.pt --keyword stop --file recordings/stop.wav
+```
+
+The demo automatically:
+
+- loads the audio file with `torchaudio`
+- converts stereo/multi-channel audio to mono
+- resamples audio to 16 kHz if necessary
+- pads audio shorter than 1 second
+- truncates audio longer than 1 second
+- applies the same log-mel preprocessing used by BC-ResNet
+- prints the model's top prediction, target confidence, and inference time
+
+Example output when the target word is detected:
+
+```text
+Top prediction : YES
+Target score   : 94.8%
+Inference      : 38.2 ms
+
+✓ DETECTED: YES
+```
+
+If the selected keyword is not detected:
+
+```text
+Top prediction : NO
+Target score   : 3.1%
+Inference      : 37.9 ms
+
+Not detected.
+```
+
+**Tip:** For the easiest first test, use file mode. You can record a short `.wav` clip of yourself saying the target word and run it through the trained model before troubleshooting live microphone input.
 
 The demo displays information similar to:
 
@@ -200,6 +266,7 @@ Important options include:
 ```text
 --checkpoint    Path to the trained checkpoint
 --keyword       Keyword to detect
+--file          Audio file to classify instead of using the microphone
 --threshold     Detection confidence threshold (default: 0.80)
 --cooldown      Seconds to wait after a detection (default: 1.0)
 --gpu           GPU device ID
