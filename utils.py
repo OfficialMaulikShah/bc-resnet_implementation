@@ -75,6 +75,73 @@ class SpeechCommand(Dataset):
         return sample, label
 
 
+class CustomKeywordDataset(Dataset):
+    """Binary keyword-vs-other dataset built from a GSC split directory.
+
+    Label 1 = target keyword, label 0 = every other spoken word/class.
+    Negative examples are capped to keep the binary dataset reasonably balanced.
+    """
+
+    def __init__(self, root_dir, keyword, transform=None, negative_ratio=2, seed=42):
+        self.transform = transform
+        self.keyword = keyword.lower()
+
+        keyword_dir = os.path.join(root_dir, self.keyword)
+        if not os.path.isdir(keyword_dir):
+            raise FileNotFoundError(
+                f"Keyword '{keyword}' was not found in {root_dir}. "
+                f"Expected directory: {keyword_dir}"
+            )
+
+        positives = []
+        negatives = []
+        for class_dir in sorted(glob(os.path.join(root_dir, "*"))):
+            if not os.path.isdir(class_dir):
+                continue
+            class_name = os.path.basename(class_dir)
+            files = [x for x in glob(os.path.join(class_dir, "*.wav")) if os.path.isfile(x)]
+            if class_name == self.keyword:
+                positives.extend(files)
+            else:
+                negatives.extend(files)
+
+        if not positives:
+            raise RuntimeError(f"No WAV files found for keyword '{keyword}' in {keyword_dir}")
+        if not negatives:
+            raise RuntimeError(f"No negative WAV files found in {root_dir}")
+
+        rng = random.Random(seed)
+        rng.shuffle(negatives)
+        max_negatives = min(len(negatives), len(positives) * negative_ratio)
+        negatives = negatives[:max_negatives]
+
+        self.data_list = positives + negatives
+        self.labels = [1] * len(positives) + [0] * len(negatives)
+
+        combined = list(zip(self.data_list, self.labels))
+        rng.shuffle(combined)
+        self.data_list, self.labels = zip(*combined)
+        self.data_list = list(self.data_list)
+        self.labels = list(self.labels)
+
+        print(
+            f"Custom keyword dataset: {root_dir} | keyword='{self.keyword}' | "
+            f"positive={len(positives)} negative={len(negatives)} total={len(self.labels)}"
+        )
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        audio_path = self.data_list[idx]
+        sample, _ = torchaudio.load(audio_path)
+        if sample.shape[0] > 1:
+            sample = sample.mean(dim=0, keepdim=True)
+        if self.transform:
+            sample = self.transform(sample)
+        return sample, self.labels[idx]
+
+
 def spec_augment(
     x, frequency_masking_para=20, time_masking_para=20, frequency_mask_num=2, time_mask_num=2
 ):
@@ -109,6 +176,7 @@ class Preprocess:
         time_masking_para=20,
         frequency_mask_num=2,
         time_mask_num=2,
+        keyword_mode=False,
     ):
         if noise_loc is None:
             self.background_noise = []
@@ -128,6 +196,7 @@ class Preprocess:
         self.sample_len = sample_rate
         self.specaug = specaug
         self.device = device
+        self.keyword_mode = keyword_mode
         if self.specaug:
             self.frequency_masking_para = frequency_masking_para
             self.time_masking_para = time_masking_para
@@ -142,11 +211,18 @@ class Preprocess:
         assert len(x.shape) == 3
         if augment:
             for idx in range(x.shape[0]):
-                if labels[idx] != 0 and (not is_train or random.random() > noise_prob):
-                    continue
-                noise_amp = (
-                    np.random.uniform(0, 0.1) if labels[idx] != 0 else np.random.uniform(0, 1)
-                )
+                if self.keyword_mode:
+                    # In binary keyword-vs-other training, label 0 is a real
+                    # negative spoken word, not the original GSC silence class.
+                    if not is_train or random.random() > noise_prob:
+                        continue
+                    noise_amp = np.random.uniform(0, 0.1)
+                else:
+                    if labels[idx] != 0 and (not is_train or random.random() > noise_prob):
+                        continue
+                    noise_amp = (
+                        np.random.uniform(0, 0.1) if labels[idx] != 0 else np.random.uniform(0, 1)
+                    )
                 noise = random.choice(self.background_noise).to(self.device)
                 sample_loc = random.randint(0, noise.shape[-1] - self.sample_len)
                 noise = noise_amp * noise[:, sample_loc : sample_loc + SR]

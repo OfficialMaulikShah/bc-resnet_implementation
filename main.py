@@ -14,22 +14,51 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from bcresnet import BCResNets
-from utils import DownloadDataset, Padding, Preprocess, SpeechCommand, SplitDataset
+from utils import (
+    CustomKeywordDataset,
+    DownloadDataset,
+    Padding,
+    Preprocess,
+    SpeechCommand,
+    SplitDataset,
+)
 
 
 class Trainer:
     def __init__(self):
         parser = ArgumentParser(description="Train BC-ResNet on Google Speech Commands.")
-        parser.add_argument("--ver", default=2, help="Google Speech Commands version 1 or 2", type=int, choices=[1, 2])
+        parser.add_argument("--ver", default=1, help="Google Speech Commands version 1 or 2", type=int, choices=[1, 2])
         parser.add_argument("--tau", default=1, help="Model size", type=float, choices=[1, 1.5, 2, 3, 6, 8])
         parser.add_argument("--gpu", default=0, help="GPU device id", type=int)
         parser.add_argument("--download", help="Download and prepare the dataset", action="store_true")
         parser.add_argument("--epochs", default=30, help="Number of training epochs", type=int)
         parser.add_argument("--batch-size", default=100, help="Training batch size", type=int)
         parser.add_argument("--save", default="astra.pt", help="Output checkpoint path")
+
+        # Custom binary keyword mode.
+        parser.add_argument(
+            "--custom",
+            action="store_true",
+            help="Train a binary target-keyword-vs-other model using the raw GSC split.",
+        )
+        parser.add_argument(
+            "--keyword",
+            default="marvin",
+            help="Keyword to detect in --custom mode (e.g. marvin).",
+        )
+        parser.add_argument(
+            "--negative-ratio",
+            default=2,
+            type=int,
+            help="Maximum number of negative examples per positive example in --custom mode.",
+        )
         args = parser.parse_args()
 
+        if args.custom and not args.keyword.strip():
+            raise SystemExit("--keyword cannot be empty in --custom mode.")
+
         self.__dict__.update(vars(args))
+        self.keyword = self.keyword.lower().strip()
         self.device = torch.device(
             "cuda:%d" % self.gpu if torch.cuda.is_available() else "cpu"
         )
@@ -90,7 +119,12 @@ class Trainer:
 
             print(
                 "epoch %d/%d - loss: %.4f - lr: %.5f"
-                % (epoch + 1, total_epoch, running_loss / max(1, len(self.train_loader)), lr)
+                % (
+                    epoch + 1,
+                    total_epoch,
+                    running_loss / max(1, len(self.train_loader)),
+                    lr,
+                )
             )
 
             with torch.no_grad():
@@ -103,17 +137,16 @@ class Trainer:
         test_acc = self.Test(self.test_dataset, self.test_loader, augment=False)
         print("test acc: %.3f%%" % test_acc)
 
-        # Save metadata together with the weights so demo.py can automatically
-        # construct the same BC-ResNet size used during training.
-        torch.save(
-            {
-                "model_state_dict": self.model.state_dict(),
-                "tau": self.tau,
-                "ver": self.ver,
-                "test_accuracy": float(test_acc),
-            },
-            self.save,
-        )
+        checkpoint = {
+            "model_state_dict": self.model.state_dict(),
+            "tau": self.tau,
+            "ver": self.ver,
+            "num_classes": 2 if self.custom else 12,
+            "custom": self.custom,
+            "keyword": self.keyword if self.custom else None,
+            "test_accuracy": float(test_acc),
+        }
+        torch.save(checkpoint, self.save)
         print("Saved checkpoint:", self.save)
         print("End.")
 
@@ -133,9 +166,8 @@ class Trainer:
 
         return true_count / num_testdata * 100.0
 
-    def _load_data(self):
-        print("Check Google Speech Commands dataset v1 or v2 ...")
-
+    def _download_data(self):
+        """Download and create the standard Qualcomm GSC split structure."""
         if not os.path.isdir("./data"):
             os.mkdir("./data")
 
@@ -156,31 +188,90 @@ class Trainer:
 
         test_dir = base_dir.replace("commands", "commands_test_set")
 
+        old_dirs = glob(base_dir.replace("commands_", "commands_*"))
+        for old_dir in old_dirs:
+            if os.path.isdir(old_dir):
+                shutil.rmtree(old_dir)
+
+        if os.path.isdir(test_dir):
+            shutil.rmtree(test_dir)
+        os.mkdir(test_dir)
+        DownloadDataset(test_dir, url_test)
+
+        if os.path.isdir(base_dir):
+            shutil.rmtree(base_dir)
+        os.mkdir(base_dir)
+        DownloadDataset(base_dir, url)
+        SplitDataset(base_dir)
+        print("Done...")
+
+        return base_dir
+
+    def _load_data(self):
+        print("Check Google Speech Commands dataset v1 or v2 ...")
+
+        base_dir = "./data/speech_commands_v0.01"
+        if self.ver == 2:
+            base_dir = base_dir.replace("v0.01", "v0.02")
+
         if self.download:
-            old_dirs = glob(base_dir.replace("commands_", "commands_*"))
-            for old_dir in old_dirs:
-                if os.path.isdir(old_dir):
-                    shutil.rmtree(old_dir)
+            base_dir = self._download_data()
 
-            if os.path.isdir(test_dir):
-                shutil.rmtree(test_dir)
-            os.mkdir(test_dir)
-            DownloadDataset(test_dir, url_test)
+        if not os.path.isdir(base_dir):
+            raise SystemExit(
+                "Dataset not found. Run with --download first, for example:\n"
+                "  python main.py --ver 1 --download --custom --keyword marvin"
+            )
 
-            if os.path.isdir(base_dir):
-                shutil.rmtree(base_dir)
-            os.mkdir(base_dir)
-            DownloadDataset(base_dir, url)
-            SplitDataset(base_dir)
-            print("Done...")
-
-        train_dir = "%s/train_12class" % base_dir
-        valid_dir = "%s/valid_12class" % base_dir
         noise_dir = "%s/_background_noise_" % base_dir
-
         transform = transforms.Compose([Padding()])
 
-        self.train_dataset = SpeechCommand(train_dir, self.ver, transform=transform)
+        if self.custom:
+            # IMPORTANT: use the original class directories created by SplitDataset,
+            # not the 12-class directories. Otherwise 'marvin' has already been
+            # folded into _unknown_.
+            split_root = base_dir + "_split"
+            train_dir = os.path.join(split_root, "train")
+            valid_dir = os.path.join(split_root, "valid")
+            test_dir = os.path.join(split_root, "test")
+
+            for required_dir in (train_dir, valid_dir, test_dir):
+                if not os.path.isdir(required_dir):
+                    raise SystemExit(
+                        f"Missing GSC split directory: {required_dir}. "
+                        "Run again with --download."
+                    )
+
+            self.train_dataset = CustomKeywordDataset(
+                train_dir,
+                self.keyword,
+                transform=transform,
+                negative_ratio=self.negative_ratio,
+                seed=42,
+            )
+            self.valid_dataset = CustomKeywordDataset(
+                valid_dir,
+                self.keyword,
+                transform=transform,
+                negative_ratio=self.negative_ratio,
+                seed=43,
+            )
+            self.test_dataset = CustomKeywordDataset(
+                test_dir,
+                self.keyword,
+                transform=transform,
+                negative_ratio=self.negative_ratio,
+                seed=44,
+            )
+        else:
+            train_dir = "%s/train_12class" % base_dir
+            valid_dir = "%s/valid_12class" % base_dir
+            test_dir = base_dir.replace("commands", "commands_test_set")
+
+            self.train_dataset = SpeechCommand(train_dir, self.ver, transform=transform)
+            self.valid_dataset = SpeechCommand(valid_dir, self.ver, transform=transform)
+            self.test_dataset = SpeechCommand(test_dir, self.ver, transform=transform)
+
         self.train_loader = DataLoader(
             self.train_dataset,
             batch_size=self.batch_size,
@@ -188,13 +279,9 @@ class Trainer:
             num_workers=0,
             drop_last=False,
         )
-
-        self.valid_dataset = SpeechCommand(valid_dir, self.ver, transform=transform)
         self.valid_loader = DataLoader(
             self.valid_dataset, batch_size=self.batch_size, num_workers=0
         )
-
-        self.test_dataset = SpeechCommand(test_dir, self.ver, transform=transform)
         self.test_loader = DataLoader(
             self.test_dataset, batch_size=self.batch_size, num_workers=0
         )
@@ -212,15 +299,27 @@ class Trainer:
             self.device,
             specaug=specaugment,
             frequency_masking_para=frequency_masking_para[self.tau],
+            keyword_mode=self.custom,
         )
-        self.preprocess_test = Preprocess(noise_dir, self.device)
+        self.preprocess_test = Preprocess(
+            noise_dir,
+            self.device,
+            keyword_mode=self.custom,
+        )
 
     def _load_model(self):
-        print(
-            "model: BC-ResNet-%.1f on Google Speech Commands v0.0%d"
-            % (self.tau, self.ver)
-        )
-        self.model = BCResNets(int(self.tau * 8)).to(self.device)
+        if self.custom:
+            print(
+                "model: BC-ResNet-%.1f | binary keyword classifier | keyword='%s'"
+                % (self.tau, self.keyword)
+            )
+            self.model = BCResNets(int(self.tau * 8), num_classes=2).to(self.device)
+        else:
+            print(
+                "model: BC-ResNet-%.1f on Google Speech Commands v0.0%d"
+                % (self.tau, self.ver)
+            )
+            self.model = BCResNets(int(self.tau * 8), num_classes=12).to(self.device)
 
 
 if __name__ == "__main__":

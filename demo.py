@@ -28,14 +28,20 @@ def load_model(checkpoint_path, device, tau_override=None):
     if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
         state_dict = checkpoint["model_state_dict"]
         tau = checkpoint.get("tau", tau_override or 1)
+        num_classes = checkpoint.get("num_classes", 12)
+        custom = checkpoint.get("custom", False)
+        saved_keyword = checkpoint.get("keyword")
     else:
         state_dict = checkpoint
         tau = tau_override or 1
+        num_classes = 12
+        custom = False
+        saved_keyword = None
 
-    model = BCResNets(int(float(tau) * 8)).to(device)
+    model = BCResNets(int(float(tau) * 8), num_classes=int(num_classes)).to(device)
     model.load_state_dict(state_dict)
     model.eval()
-    return model, float(tau)
+    return model, float(tau), bool(custom), saved_keyword, int(num_classes)
 
 
 def prepare_audio_file(path):
@@ -92,7 +98,7 @@ def predict(model, preprocess, audio, dummy_labels, device, target_id):
 def main():
     parser = argparse.ArgumentParser(description="BC-ResNet keyword spotting demo")
     parser.add_argument("--checkpoint", default="astra.pt")
-    parser.add_argument("--keyword", default="stop", choices=sorted(label_dict.keys()))
+    parser.add_argument("--keyword", default=None, help="Target keyword. In custom mode this is usually 'marvin'.")
     parser.add_argument("--file", default=None, help="Audio file to classify instead of using the microphone")
     parser.add_argument("--threshold", type=float, default=0.80)
     parser.add_argument("--cooldown", type=float, default=1.0)
@@ -103,24 +109,35 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.keyword in ("_silence_", "_unknown_"):
-        raise SystemExit("Choose a real keyword such as stop, yes, no, go, left, or right.")
-
     device = torch.device(
         "cuda:%d" % args.gpu if torch.cuda.is_available() else "cpu"
     )
 
     print("Loading model on", device)
-    model, tau = load_model(args.checkpoint, device, args.tau)
-    target_id = label_dict[args.keyword]
-    preprocess = Preprocess(noise_loc=None, device=device)
+    model, tau, custom, saved_keyword, num_classes = load_model(args.checkpoint, device, args.tau)
+
+    if custom:
+        keyword = (args.keyword or saved_keyword or "marvin").lower()
+        target_id = 1
+        id_to_label = {0: "other", 1: keyword}
+    else:
+        keyword = (args.keyword or "stop").lower()
+        if keyword not in label_dict or keyword in ("_silence_", "_unknown_"):
+            raise SystemExit(
+                "For a standard 12-class checkpoint, choose a keyword such as stop, yes, no, go, left, or right."
+            )
+        target_id = label_dict[keyword]
+        id_to_label = ID_TO_LABEL
+
+    preprocess = Preprocess(noise_loc=None, device=device, keyword_mode=custom)
     dummy_labels = torch.zeros(1, dtype=torch.long, device=device)
 
     print()
     print("=" * 52)
     print("              BC-RESNET KEYWORD SPOTTER")
     print("=" * 52)
-    print("Keyword  :", args.keyword.upper())
+    print("Keyword  :", keyword.upper())
+    print("Mode     :", "custom binary" if custom else "12-class GSC")
     print("Model    : BC-ResNet-%.1f" % tau)
     print("Device   :", device)
     print("Threshold: %.0f%%" % (args.threshold * 100))
@@ -135,14 +152,14 @@ def main():
         predicted_id, confidence, latency_ms = predict(
             model, preprocess, audio, dummy_labels, device, target_id
         )
-        predicted_name = ID_TO_LABEL.get(predicted_id, "unknown")
+        predicted_name = id_to_label.get(predicted_id, "unknown")
 
         print("Top prediction : %s" % predicted_name.upper())
         print("Target score   : %.1f%%" % (confidence * 100))
         print("Inference      : %.1f ms" % latency_ms)
 
         if predicted_id == target_id and confidence >= args.threshold:
-            print("\n\033[1;32m✓ DETECTED: %s\033[0m" % args.keyword.upper())
+            print("\n\033[1;32m✓ DETECTED: %s\033[0m" % keyword.upper())
         else:
             print("\nNot detected.")
         return
@@ -176,7 +193,7 @@ def main():
             )
 
             now = time.monotonic()
-            predicted_name = ID_TO_LABEL.get(predicted_id, "unknown")
+            predicted_name = id_to_label.get(predicted_id, "unknown")
 
             if (
                 confidence >= args.threshold
@@ -185,7 +202,7 @@ def main():
             ):
                 print(
                     "\r\033[1;32m✓ DETECTED: %s\033[0m  confidence=%5.1f%%  inference=%5.1f ms"
-                    % (args.keyword.upper(), confidence * 100, latency_ms)
+                    % (keyword.upper(), confidence * 100, latency_ms)
                 )
                 last_detection = now
             else:
