@@ -10,7 +10,7 @@ The original implementation supports the **Google Speech Commands (GSC) v1 and v
 Microphone → audio preprocessing → BC-ResNet → keyword confidence → DETECTED
 ```
 
-The initial prototype uses one existing GSC keyword (for example, `yes` or `stop`). A custom keyword can be added later once the baseline pipeline is working.
+The prototype can also train a custom binary keyword detector. The current target keyword is **`marvin`**, which is already present in the Google Speech Commands dataset, so no custom recordings are required.
 
 ## Getting Started
 
@@ -106,7 +106,7 @@ python main.py --ver 1 --tau 1 --gpu 0 --epochs 30 --save stop_bcresnet.pt
 - `--ver 1` → Google Speech Commands **v1**
 - `--ver 2` → Google Speech Commands **v2**
 
-This project currently uses v1 for the hackathon prototype.
+The standard examples use v1, while the current custom `marvin` detector can be trained on v2 as described above.
 
 ### What `--tau` means
 
@@ -117,6 +117,100 @@ This project currently uses v1 for the hackathon prototype.
 ```
 
 This is the smallest model and is useful for getting the complete pipeline running quickly. Larger values can be tested later.
+
+
+## Custom Keyword: MARVIN
+
+This project supports a custom binary classification mode that trains BC-ResNet to distinguish **`marvin`** from **other spoken words** in the Google Speech Commands dataset.
+
+Because `marvin` is already included in the dataset, you do **not** need to record your own training clips. The custom mode uses the raw dataset splits so that `marvin` remains a distinct positive class instead of being folded into the standard `_unknown_` class.
+
+### Train on Google Speech Commands v2
+
+To download Speech Commands **v2** and train the custom `marvin` detector:
+
+```bash
+python main.py \
+    --ver 2 \
+    --download \
+    --custom \
+    --keyword marvin \
+    --tau 1 \
+    --gpu 0 \
+    --epochs 30 \
+    --save marvin_bcresnet_v2.pt
+```
+
+For a quick pipeline test, use only one epoch first:
+
+```bash
+python main.py --ver 2 --download --custom --keyword marvin --tau 1 --gpu 0 --epochs 1 --save marvin_test.pt
+```
+
+After the dataset has been downloaded, `--download` is not required for subsequent training runs.
+
+### Class imbalance
+
+The dataset contains many more clips that are **not `marvin`** than clips that are `marvin`. Training directly on every negative clip can cause the model to become biased toward the `OTHER` class. Overall accuracy can then look high even if the model is poor at detecting `marvin`.
+
+The custom dataset loader handles this automatically using `--negative-ratio`. By default, it keeps at most **2 negative examples for every 1 positive (`marvin`) example**:
+
+```text
+MARVIN : OTHER
+   1   :   2
+```
+
+The default is:
+
+```bash
+--negative-ratio 2
+```
+
+You can use a 1:1 balance instead with:
+
+```bash
+--negative-ratio 1
+```
+
+For example:
+
+```bash
+python main.py \
+    --ver 2 \
+    --download \
+    --custom \
+    --keyword marvin \
+    --negative-ratio 1 \
+    --tau 1 \
+    --gpu 0 \
+    --epochs 30 \
+    --save marvin_bcresnet_v2.pt
+```
+
+A 1:2 ratio is a good starting point because it provides more negative examples without allowing the negative class to overwhelm the positive class.
+
+### Run the MARVIN detector
+
+After training, the checkpoint stores the custom keyword, so `--keyword` does not need to be specified during inference.
+
+For a WAV file:
+
+```bash
+python demo.py --checkpoint marvin_bcresnet_v2.pt --file your_audio.wav
+```
+
+For microphone inference:
+
+```bash
+python demo.py --checkpoint marvin_bcresnet_v2.pt
+```
+
+The model performs binary classification:
+
+```text
+MARVIN  → positive / detected
+OTHER   → negative / not detected
+```
 
 ## Dataset and Classes
 
@@ -279,6 +373,81 @@ Example with a stricter threshold:
 python demo.py --checkpoint astra.pt --keyword yes --threshold 0.90
 ```
 
+## Recommended Hackathon Workflow
+
+The recommended order is:
+
+```text
+1. Set up BC-ResNet
+        ↓
+2. Download Google Speech Commands v1
+        ↓
+3. Train BC-ResNet-1
+        ↓
+4. Verify validation/test accuracy
+        ↓
+5. Run microphone demo
+        ↓
+6. Say the selected keyword
+        ↓
+7. Show ✓ DETECTED
+        ↓
+8. Use the custom `marvin` binary detector when a single-word target is required
+```
+
+### Minimum viable demo
+
+The minimum working prototype is simply:
+
+```text
+🎤 Microphone
+     ↓
+  BC-ResNet
+     ↓
+  keyword?
+     ↓
+✓ DETECTED
+```
+
+A website or graphical interface is optional. The terminal demo is enough to validate the complete ML pipeline before spending time on UI.
+
+## Troubleshooting
+
+### `OSError: PortAudio library not found`
+
+Install the Ubuntu system libraries:
+
+```bash
+sudo apt update
+sudo apt install portaudio19-dev libportaudio2
+```
+
+Then test:
+
+```bash
+python -c "import sounddevice as sd; print(sd.query_devices())"
+```
+
+### No microphone appears
+
+Run:
+
+```bash
+python -c "import sounddevice as sd; print(sd.query_devices())"
+```
+
+Check that an input device is listed. If multiple microphones are available, the default system input device can be changed in Ubuntu's sound settings.
+
+### CUDA/GPU issues
+
+To check whether PyTorch sees your GPU:
+
+```bash
+python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+```
+
+If CUDA is unavailable, the code can fall back to CPU, although training and inference may be slower.
+
 ## Project Files
 
 ```text
@@ -291,6 +460,7 @@ demo.py             Real-time microphone keyword detection
 
 ## Reference
 
+If you find this work useful for your research, please cite:
 
 ```text
 @inproceedings{kim21l_interspeech,
